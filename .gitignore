@@ -1,0 +1,9 @@
+.DS_Store
+*.pyc
+*.pyo
+.venv
+.vscode/
+poetry.lock
+.pytest_cache/
+.mypy_cache/
+*.pickle
