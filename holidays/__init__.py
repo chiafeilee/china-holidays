@@ -9,11 +9,11 @@ import requests
 from bs4 import BeautifulSoup, element
 
 
-SCRAPE_URL = "http://xxgk.www.gov.cn/search-zhengce/?mode=smart&sort=relevant&page_index=1&page_size=2&title=节假日&tag=国办发明电"
+SCRAPE_URL = "http://xxgk.www.gov.cn/search-zhengce/?mode=smart&sort=time&page_index=1&page_size=2&title=节假日"
 HOLIDAY_FILE = "holiday.pickle"
-RE_SENTENCE = re.compile("^([一二三四五六七])、(.+)：(.+)，共(\d)天。([\S]*)$")
 RE_YEAR = re.compile("(\d+)年")
 DATE_FMT = "YYYY-MM-DD"
+PATTERN = "、(.*?)：((?:\d{4}年)?\d{1,2}月\d{1,2}日)[至]?((?:\d{4}年)?(?:\d{1,2}月)?\d{1,2}日)?\S+，共(\d)天。(?:(.*?)上班)?"
 
 
 def as_date_str(d):
@@ -36,69 +36,84 @@ class HolidayModel:
         return rv
 
 
-class HolidayNotice:
+class HolidayParser:
     content: element.ResultSet
 
     def __init__(self, content: element.ResultSet, year: int) -> None:
         self.content = content
         self.year = year
 
-    def _parse_date(self, content: str):
-        dates = re.finditer(r"(\d+月\d+日)", content)
-        for d in dates:
-            rv = (
-                f"{self.year}年{d.group()}".replace("年", "-")
-                .replace("月", "-")
-                .replace("日", "")
+    def _parse_shifts(self, shifts: str):
+        if not shifts:
+            return []
+        shift_list = shifts.split("、")
+        rv = []
+        for s in shift_list:
+            date_ = re.findall(r"(\d+月\d)", s)[0]
+            rv.append(
+                arrow.get(f"{self.year}-{date_.replace('月', '-')}").format(DATE_FMT)
             )
-            yield as_date_str(rv)
+        return rv
 
-    def holiday(self) -> Optional[HolidayModel]:
-        match = RE_SENTENCE.match(self.content.get_text())
-
+    def parse(self):
+        match = re.findall(PATTERN, self.content.get_text())
         if not match:
-            return None
+            return None, None
 
-        _, festival, hol, days, shifts = match.groups()
+        holiday_name, start_date, end_date, days, shifts = match[0]
+        prev_holiday = None
 
-        start_date = hol.split("至")[0]
-        if "年" not in start_date:
-            start_date = f"{self.year}年{start_date}"
-
-        start_date = as_date_str(
-            start_date.replace("年", "-").replace("月", "-").replace("日", "")
-        )
-        transfer_shifts = []
-
-        if shifts:
-            transfer_shifts.extend(list(self._parse_date(shifts)))
-
-        return HolidayModel(self.year, festival, start_date, int(days), transfer_shifts)
+        # 节日跨年
+        if "年" in start_date and "年" in end_date:
+            start_date = re.sub(r"年|月", "-", start_date).replace("日", "")
+            prev_year = int(start_date.split("-")[0])
+            prev_holiday_days = (
+                arrow.get(f"{prev_year}-12-31") - arrow.get(start_date)
+            ).days + 1
+            prev_holiday = HolidayModel(
+                prev_year, holiday_name, start_date, prev_holiday_days, None
+            )
+            now_holiday = HolidayModel(
+                self.year,
+                holiday_name,
+                f"{self.year}-1-1",
+                int(days) - prev_holiday_days,
+                None,
+            )
+        else:
+            if "年" not in start_date:
+                start_date = f"{self.year}年{start_date}"
+            start_date = re.sub(r"年|月", "-", start_date).replace("日", "")
+            now_holiday = HolidayModel(
+                self.year,
+                holiday_name,
+                start_date,
+                int(days),
+                self._parse_shifts(shifts),
+            )
+        return prev_holiday, now_holiday
 
 
 def populate():
     notices = requests.get(SCRAPE_URL).json()["data"]
     holidays = []
-    ds = {}
     for notice in notices:
         year = RE_YEAR.findall(notice["title"])[0]
         post = requests.get(notice["url"]).content
         soup = BeautifulSoup(post, features="html.parser")
-        contents = soup.find_all(
-            "p",
-            attrs={
-                "style": "text-align: justify; text-indent: 2em; font-family: 宋体; margin-top: 0px; margin-bottom: 0px;"
-            },
-        )
+        contents = soup.find_all("p")
+
         for c in contents:
-            rv = HolidayNotice(c, int(year)).holiday()
-            if not rv:
+            prev, now = HolidayParser(c, int(year)).parse()
+            if not prev and not now:
                 continue
-            holidays.append(asdict(rv))
-        ds[year] = holidays
+            print(prev, now)
+            if prev:
+                holidays.append(asdict(prev))
+            holidays.append(asdict(now))
 
     with open(HOLIDAY_FILE, "wb") as f:
-        pickle.dump(ds, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(holidays, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 try:
@@ -114,7 +129,10 @@ class Holiday:
 
     def __init__(self, year: int) -> None:
         self.year = year
-        self.holidays = [HolidayModel(**r) for r in holiday_data[str(self.year)]]
+        self.holidays = [
+            HolidayModel(**r)
+            for r in [h for h in holiday_data if h["year"] == self.year]
+        ]
 
     def __contains__(self, d: Union[str, datetime, date]):
         if not isinstance(d, (str, datetime, date)):
@@ -134,9 +152,10 @@ class Holiday:
         if d.date() in self:
             return False
 
+        print(self.holidays)
         all_transfer_shifts: List[str] = []
         for h in self.holidays:
-            all_transfer_shifts.extend(h.transfer_shifts)
+            all_transfer_shifts.extend(h.transfer_shifts or [])
 
         str_date = d.format(DATE_FMT)
         return any([d.isoweekday() <= 5, str_date in all_transfer_shifts])
