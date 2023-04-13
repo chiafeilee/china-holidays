@@ -49,11 +49,16 @@ class HolidayParser:
         shift_list = shifts.split("、")
         rv = []
         for s in shift_list:
-            date_ = re.findall(r"(\d+月\d)", s)[0]
+            date_ = re.findall(r"(\d+月\d+)", s)[0]
             rv.append(
                 arrow.get(f"{self.year}-{date_.replace('月', '-')}").format(DATE_FMT)
             )
         return rv
+
+    def _format_date(self, date_str: str):
+        return arrow.get(re.sub(r"年|月", "-", date_str).replace("日", "")).format(
+            DATE_FMT
+        )
 
     def parse(self):
         match = re.findall(PATTERN, self.content.get_text())
@@ -63,27 +68,27 @@ class HolidayParser:
         holiday_name, start_date, end_date, days, shifts = match[0]
         prev_holiday = None
 
-        # 节日跨年
+        # cross year
         if "年" in start_date and "年" in end_date:
-            start_date = re.sub(r"年|月", "-", start_date).replace("日", "")
+            start_date = self._format_date(start_date)
             prev_year = int(start_date.split("-")[0])
-            prev_holiday_days = (
-                arrow.get(f"{prev_year}-12-31") - arrow.get(start_date)
-            ).days + 1
+            prev_year_last_day = arrow.get(f"{prev_year}-12-31")
+            prev_holiday_days = (prev_year_last_day - arrow.get(start_date)).days + 1
             prev_holiday = HolidayModel(
                 prev_year, holiday_name, start_date, prev_holiday_days, None
             )
             now_holiday = HolidayModel(
                 self.year,
                 holiday_name,
-                f"{self.year}-1-1",
+                f"{self.year}-01-01",
                 int(days) - prev_holiday_days,
                 None,
             )
         else:
             if "年" not in start_date:
                 start_date = f"{self.year}年{start_date}"
-            start_date = re.sub(r"年|月", "-", start_date).replace("日", "")
+
+            start_date = self._format_date(start_date)
             now_holiday = HolidayModel(
                 self.year,
                 holiday_name,
@@ -107,7 +112,7 @@ def populate():
             prev, now = HolidayParser(c, int(year)).parse()
             if not prev and not now:
                 continue
-            print(prev, now)
+
             if prev:
                 holidays.append(asdict(prev))
             holidays.append(asdict(now))
@@ -133,18 +138,18 @@ class Holiday:
             HolidayModel(**r)
             for r in [h for h in holiday_data if h["year"] == self.year]
         ]
+        self.holiday_dates = set()
+        for h in self.holidays:
+            for d in h.dates:
+                self.holiday_dates.add(d)
 
     def __contains__(self, d: Union[str, datetime, date]):
         if not isinstance(d, (str, datetime, date)):
             raise TypeError(f"Can't conver type {type(d)} to date.")
 
-        d = as_date_str(d)
-        contained = False
-        for h in self.holidays:
-            if d in h.dates:
-                contained = True
-                break
-        return contained
+        str_date = as_date_str(d)
+
+        return str_date in self.holiday_dates
 
     def is_workday(self, d):
         d = arrow.get(d)
@@ -152,7 +157,6 @@ class Holiday:
         if d.date() in self:
             return False
 
-        print(self.holidays)
         all_transfer_shifts: List[str] = []
         for h in self.holidays:
             all_transfer_shifts.extend(h.transfer_shifts or [])
