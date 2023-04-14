@@ -1,4 +1,4 @@
-# Simple Python China Holidays Library
+# Simple Python Chinese Holiday Library
 
 A simple & easy to use library for checking whether a date is a China holiday or a work day.
 
